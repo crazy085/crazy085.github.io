@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Minimal P2P Chat</title>
+<title>Minimal Working P2P Chat</title>
 <style>
 body{font-family:system-ui;margin:0;background:#0f172a;color:#e6eef8;display:flex;flex-direction:column;height:100vh}
 header{padding:1rem;background:#071032;display:flex;align-items:center;gap:1rem}
@@ -18,7 +18,7 @@ pre{height:160px;overflow:auto;font-size:.8rem}
 </style>
 </head>
 <body>
-<header><strong>Minimal P2P Chat</strong></header>
+<header><strong>Minimal Working P2P Chat</strong></header>
 <main>
 <section class="card">
 <button id="createBtn">Create Room</button>
@@ -69,12 +69,12 @@ async function clearSignals(room){ await remove(ref(db, `rooms/${room}`)); }
 
 // WebRTC
 let pc, dc, roomId;
-let iceQueue=[];
+let iceQueue = [];
 
+// Create peer
 async function createPeer(isCaller){
   pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
   pc.onconnectionstatechange = ()=>{$("status").textContent=pc.connectionState; log("State: "+pc.connectionState);}
-  
   pc.onicecandidate = e=>{ if(e.candidate) writeSignal(roomId,'ice',JSON.stringify(e.candidate)); };
   
   if(isCaller){
@@ -82,34 +82,42 @@ async function createPeer(isCaller){
     setupDC();
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    writeSignal(roomId,'sdp',JSON.stringify(offer));
+    await writeSignal(roomId,'sdp',JSON.stringify(offer));
     log("Offer sent");
   } else {
     pc.ondatachannel = e=>{ dc=e.channel; setupDC(); };
   }
 }
 
+// Setup DataChannel
 function setupDC(){
   dc.onopen = ()=>{$("status").textContent="connected"; clearSignals(roomId); log("DataChannel open ✅");};
   dc.onmessage = e=>{ showMessage(e.data,false); };
 }
 
+// Handle signals
 async function handleSignal(_, obj){
   const data = JSON.parse(obj.payload);
-  if(data.type==="answer" || data.sdp){
-    // Set remoteDescription once
-    const sdp = data.sdp||data;
-    if(!pc.currentRemoteDescription){
-      await pc.setRemoteDescription(sdp);
-      log("Remote SDP set");
-      // Flush queued ICE
-      for(const c of iceQueue){ await pc.addIceCandidate(c); }
-      iceQueue=[];
+
+  if(data.type === "offer" || data.type === "answer"){
+    // proper SDP object
+    await pc.setRemoteDescription(data);
+    log("Remote SDP set");
+
+    if(data.type === "offer"){
+      const ans = await pc.createAnswer();
+      await pc.setLocalDescription(ans);
+      await writeSignal(roomId,'sdp',JSON.stringify(ans));
+      log("Answer sent");
     }
-  } else if(data.type==="ice" || data.candidate){
-    const cand = data.candidate||data;
-    if(pc.remoteDescription) await pc.addIceCandidate(cand);
-    else iceQueue.push(cand);
+
+    // flush ICE queue
+    for(const c of iceQueue){ await pc.addIceCandidate(c); }
+    iceQueue = [];
+  }
+  else if(data.candidate){
+    if(pc.remoteDescription) await pc.addIceCandidate(data);
+    else iceQueue.push(data);
     log("ICE received");
   }
 }
