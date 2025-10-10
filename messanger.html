@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Private P2P Chat</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:#0f172a;color:#e6eef8;display:flex;flex-direction:column;height:100vh}
+    header{padding:1rem;background:#071032;display:flex;align-items:center;gap:1rem}
+    main{flex:1;display:grid;grid-template-columns:320px 1fr;gap:1rem;padding:1rem}
+    .card{background:#0b1220;border-radius:12px;padding:12px;box-shadow:0 6px 18px rgba(2,6,23,.6)}
+    .controls{display:flex;flex-direction:column;gap:.5rem}
+    input,button,textarea{font:inherit;padding:.5rem;border-radius:8px;border:1px solid rgba(255,255,255,.06);background:transparent;color:inherit}
+    button{cursor:pointer}
+    #messages{height:calc(100vh - 160px);overflow:auto;padding:12px;display:flex;flex-direction:column;gap:.5rem}
+    .msg{max-width:70%;padding:.5rem .75rem;border-radius:10px;background:#08112a}
+    .me{align-self:flex-end;background:#12304a}
+    footer{padding:.5rem;background:#071032;text-align:center;font-size:.9rem}
+    .hint{font-size:.85rem;color:#9fb3d6}
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Private P2P Chat</strong>
+    <div style="margin-left:auto" class="hint">Invite-link + fragment secret | Temporary memory</div>
+  </header>
+  <main>
+    <section class="card controls">
+      <div>
+        <button id="createBtn">Create room (generate invite)</button>
+        <button id="joinBtn">Join room from URL</button>
+      </div>
+
+      <label class="hint">Your invite (share FULL URL including the #fragment secret):</label>
+      <textarea id="inviteBox" rows="2" readonly></textarea>
+
+      <label class="hint">Connection status:</label>
+      <div id="status">idle</div>
+
+      <label class="hint">Local logs (for debugging):</label>
+      <pre id="log" style="height:160px;overflow:auto"></pre>
+
+      <div class="hint">Keep the fragment (after #) private. If you refresh the page, re-open the same invite URL to rejoin temporarily.</div>
+    </section>
+
+    <section class="card">
+      <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem">
+        <input id="messageInput" placeholder="Type a message..." style="flex:1" />
+        <button id="sendBtn">Send</button>
+      </div>
+      <div id="messages"></div>
+    </section>
+  </main>
+  <footer>GitHub Pages + Firebase signaling | Messages stored only in browser memory</footer>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js";
+import { getDatabase, ref, push, onChildAdded, remove, get } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
+
+// 🔥 Your Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyCAuSK6SoHVqOjIS7LxnLiXRJDLYS5rA9Q",
+  authDomain: "messanger-e973f.firebaseapp.com",
+  databaseURL: "https://messanger-e973f-default-rtdb.firebaseio.com",
+  projectId: "messanger-e973f",
+  storageBucket: "messanger-e973f.firebasestorage.app",
+  messagingSenderId: "797920714063",
+  appId: "1:797920714063:web:b86d6f38191f40d8fa393a",
+  measurementId: "G-TSM8BKWNV2"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+// ===== Utilities =====
+const $ = id => document.getElementById(id);
+const log = (...a) => { const el=$("log"); el.textContent+=a.join(" ")+"\\n"; el.scrollTop=el.scrollHeight; };
+
+// Crypto helpers
+const enc = new TextEncoder(), dec = new TextDecoder();
+const toB64 = b => btoa(String.fromCharCode(...new Uint8Array(b)));
+const fromB64 = s => Uint8Array.from(atob(s), c=>c.charCodeAt(0));
+
+async function deriveKey(secret){
+  const keyData = fromB64(secret);
+  const keyMaterial = await crypto.subtle.importKey("raw", keyData, "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name:"PBKDF2", salt:new Uint8Array(16), iterations:100000, hash:"SHA-256" },
+    keyMaterial, { name:"AES-GCM", length:256 }, false, ["encrypt","decrypt"]
+  );
+}
+async function aesEncrypt(key, text){
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const buf = await crypto.subtle.encrypt({name:"AES-GCM",iv}, key, enc.encode(text));
+  return toB64(iv)+":"+toB64(buf);
+}
+async function aesDecrypt(key, combo){
+  const [ivB64, dataB64] = combo.split(":");
+  const plain = await crypto.subtle.decrypt({name:"AES-GCM",iv:fromB64(ivB64)}, key, fromB64(dataB64));
+  return dec.decode(plain);
+}
+
+// ===== Firebase signaling =====
+async function writeSignal(room, tag, payload){
+  await push(ref(db, `rooms/${room}/signals`), { tag, payload, ts:Date.now() });
+}
+function listenSignals(room, onMsg){
+  const r = ref(db, `rooms/${room}/signals`);
+  onChildAdded(r, snap => onMsg(snap.key, snap.val()));
+}
+async function clearSignals(room){
+  await remove(ref(db, `rooms/${room}`));
+}
+
+// ===== WebRTC =====
+let pc, dc, derivedKey, roomId;
+
+async function createPeer(isCaller){
+  pc = new RTCPeerConnection({iceServers:[{urls:['stun:stun.l.google.com:19302']}]});
+  pc.onicecandidate = async e=>{
+    if(e.candidate){
+      const msg = JSON.stringify({type:'ice',candidate:e.candidate});
+      const enc = await aesEncrypt(derivedKey, msg);
+      await writeSignal(roomId, 'ice', enc);
+    }
+  };
+  pc.onconnectionstatechange = ()=>{ $("status").textContent = pc.connectionState; };
+
+  if(isCaller){
+    dc = pc.createDataChannel("chat");
+    setupDC();
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const encSDP = await aesEncrypt(derivedKey, JSON.stringify({type:'sdp',sdp:pc.localDescription}));
+    await writeSignal(roomId, 'sdp', encSDP);
+  } else {
+    pc.ondatachannel = e => { dc = e.channel; setupDC(); };
+  }
+}
+
+function setupDC(){
+  dc.onopen = ()=>{ $("status").textContent="connected"; log("DataChannel open"); clearSignals(roomId); };
+  dc.onmessage = async e=>{
+    const msg = await aesDecrypt(derivedKey, e.data);
+    showMessage(msg, false);
+  };
+}
+
+async function handleSignal(_, obj){
+  const text = await aesDecrypt(derivedKey, obj.payload);
+  const data = JSON.parse(text);
+  if(data.type==="sdp"){
+    const sdp = data.sdp;
+    if(sdp.type==="offer"){
+      await pc.setRemoteDescription(sdp);
+      const ans = await pc.createAnswer();
+      await pc.setLocalDescription(ans);
+      const encAns = await aesEncrypt(derivedKey, JSON.stringify({type:'sdp',sdp:pc.localDescription}));
+      await writeSignal(roomId, 'sdp', encAns);
+    } else if(sdp.type==="answer"){
+      await pc.setRemoteDescription(sdp);
+    }
+  } else if(data.type==="ice"){
+    await pc.addIceCandidate(data.candidate);
+  }
+}
+
+// ===== UI =====
+function showMessage(t,me=true){
+  const d=document.createElement("div");
+  d.className="msg"+(me?" me":"");
+  d.textContent=t;
+  $("messages").appendChild(d);
+  $("messages").scrollTop=$("messages").scrollHeight;
+}
+
+$("createBtn").onclick = async ()=>{
+  const rid=Math.random().toString(36).slice(2,10);
+  const secretBytes=new Uint8Array(16); crypto.getRandomValues(secretBytes);
+  const secretB64=toB64(secretBytes);
+  const url=`${location.origin}${location.pathname}?room=${rid}#key=${encodeURIComponent(secretB64)}`;
+  $("inviteBox").value=url;
+  history.replaceState(null,'',`?room=${rid}#key=${encodeURIComponent(secretB64)}`);
+  derivedKey = await deriveKey(secretB64);
+  roomId=rid;
+  await createPeer(true);
+  listenSignals(rid, handleSignal);
+  log("Room created:", rid);
+};
+
+$("joinBtn").onclick = async ()=>{
+  const params=new URLSearchParams(location.search);
+  const rid=params.get("room");
+  if(!rid) return alert("No ?room in URL!");
+  const frag=location.hash.slice(1);
+  const key=decodeURIComponent(frag.split("=")[1]||"");
+  if(!key) return alert("Missing #key= fragment!");
+  derivedKey=await deriveKey(key);
+  roomId=rid;
+  await createPeer(false);
+  listenSignals(rid, handleSignal);
+  log("Joined room:", rid);
+};
+
+$("sendBtn").onclick = async ()=>{
+  const msg=$("messageInput").value.trim();
+  if(!msg||!dc||dc.readyState!=="open")return;
+  const encMsg=await aesEncrypt(derivedKey,msg);
+  dc.send(encMsg);
+  showMessage(msg,true);
+  $("messageInput").value="";
+};
+</script>
+</body>
+</html>
