@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Private P2P Chat Test</title>
+<title>Private P2P Chat Working</title>
 <style>
 body{font-family:system-ui;margin:0;background:#0f172a;color:#e6eef8;display:flex;flex-direction:column;height:100vh}
 header{padding:1rem;background:#071032;display:flex;align-items:center;gap:1rem}
@@ -18,7 +18,7 @@ pre{height:160px;overflow:auto;font-size:.8rem}
 </style>
 </head>
 <body>
-<header><strong>Private P2P Chat Test</strong></header>
+<header><strong>Private P2P Chat Working</strong></header>
 <main>
 <section class="card">
 <button id="createBtn">Create Room</button>
@@ -43,7 +43,7 @@ pre{height:160px;overflow:auto;font-size:.8rem}
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js";
 import { getDatabase, ref, push, onChildAdded, remove } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
 
-// Firebase config
+// ==== Firebase config ====
 const firebaseConfig = {
   apiKey: "AIzaSyCAuSK6SoHVqOjIS7LxnLiXRJDLYS5rA9Q",
   authDomain: "messanger-e973f.firebaseapp.com",
@@ -57,18 +57,19 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 
-// Helpers
+// === Helpers ===
 const $ = id => document.getElementById(id);
 const log = (...a) => { const el=$("log"); el.textContent+=a.join(" ")+"\n"; el.scrollTop=el.scrollHeight; };
 function showMessage(t,me=true){ const d=document.createElement("div"); d.className="msg"+(me?" me":""); d.textContent=t; $("messages").appendChild(d); $("messages").scrollTop=$("messages").scrollHeight; }
 
-// Firebase signaling
+// === Firebase signaling ===
 async function writeSignal(room, tag, payload){ await push(ref(db, `rooms/${room}/signals`), {tag,payload,ts:Date.now()}); }
 function listenSignals(room,onMsg){ onChildAdded(ref(db, `rooms/${room}/signals`), snap=>onMsg(snap.key,snap.val())); }
 async function clearSignals(room){ await remove(ref(db, `rooms/${room}`)); }
 
-// WebRTC
+// === WebRTC ===
 let pc, dc, roomId;
+let pendingICE = []; // queue ICE before remoteDescription
 
 async function createPeer(isCaller){
   const rtcConfig = {
@@ -77,29 +78,79 @@ async function createPeer(isCaller){
       {urls:'turn:relay1.expressturn.com:3478',username:'efree',credential:'efreepass'}
     ]
   };
+
   pc = new RTCPeerConnection(rtcConfig);
-  pc.onicecandidate = async e=>{ if(e.candidate){ await writeSignal(roomId,'ice',JSON.stringify({type:'ice',candidate:e.candidate})); log("Sent ICE"); } };
+
+  // ICE handling
+  pc.onicecandidate = async e => {
+    if(!e.candidate) return;
+    const msg = JSON.stringify({type:'ice',candidate:e.candidate});
+    await writeSignal(roomId,'ice',msg);
+    log("Sent ICE");
+  };
+
   pc.onconnectionstatechange = ()=>{ $("status").textContent=pc.connectionState; log("Peer state: "+pc.connectionState); };
-  if(isCaller){ dc=pc.createDataChannel("chat"); setupDC(); const offer=await pc.createOffer(); await pc.setLocalDescription(offer); await writeSignal(roomId,'sdp',JSON.stringify({type:'sdp',sdp:offer})); log("Offer sent"); }
-  else { pc.ondatachannel = e=>{ dc=e.channel; setupDC(); }; }
+
+  if(isCaller){
+    dc = pc.createDataChannel("chat");
+    setupDC();
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await writeSignal(roomId,'sdp',JSON.stringify({type:'sdp',sdp:offer}));
+    log("Offer sent");
+  } else {
+    pc.ondatachannel = e=>{ dc=e.channel; setupDC(); };
+  }
 }
 
+// Setup DataChannel
 function setupDC(){
   dc.onopen = ()=>{ $("status").textContent="connected"; log("DataChannel open ✅"); clearSignals(roomId); };
   dc.onmessage = e=>{ showMessage(e.data,false); };
 }
 
-// Handle signals
+// ICE queue handling
+async function handleICE(data){
+  if(!pc.remoteDescription){
+    pendingICE.push(data.candidate);
+    log("Queued ICE candidate");
+  } else {
+    try{ await pc.addIceCandidate(data.candidate); log("Added ICE"); }
+    catch(e){ log("ICE add error",e); }
+  }
+}
+async function flushICEQueue(){
+  for(const c of pendingICE){
+    try{ await pc.addIceCandidate(c); log("Flushed ICE"); } 
+    catch(e){ log("ICE flush error", e); }
+  }
+  pendingICE=[];
+}
+
+// Handle incoming signals
 async function handleSignal(_, obj){
   const data = JSON.parse(obj.payload);
   if(data.type==="sdp"){
-    const sdp=data.sdp;
-    if(sdp.type==="offer"){ log("Received offer"); await pc.setRemoteDescription(sdp); const ans=await pc.createAnswer(); await pc.setLocalDescription(ans); await writeSignal(roomId,'sdp',JSON.stringify({type:'sdp',sdp:ans})); log("Answer sent"); }
-    else if(sdp.type==="answer"){ log("Received answer"); await pc.setRemoteDescription(sdp); }
-  } else if(data.type==="ice"){ try{ await pc.addIceCandidate(data.candidate); log("Added ICE"); } catch(e){ log("ICE error "+e); } }
+    const sdp = data.sdp;
+    if(sdp.type==="offer"){
+      log("Received offer");
+      await pc.setRemoteDescription(sdp);
+      await flushICEQueue();
+      const ans = await pc.createAnswer();
+      await pc.setLocalDescription(ans);
+      await writeSignal(roomId,'sdp',JSON.stringify({type:'sdp',sdp:ans}));
+      log("Answer sent");
+    } else if(sdp.type==="answer"){
+      log("Received answer");
+      await pc.setRemoteDescription(sdp);
+      await flushICEQueue();
+    }
+  } else if(data.type==="ice"){
+    await handleICE(data);
+  }
 }
 
-// UI
+// === UI ===
 $("createBtn").onclick = async ()=>{
   const rid=Math.random().toString(36).slice(2,10);
   roomId=rid;
