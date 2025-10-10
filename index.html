@@ -1,165 +1,156 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Minimal Working P2P Chat</title>
-  <style>
-    body{font-family:system-ui;margin:0;background:#0f172a;color:#e6eef8;display:flex;flex-direction:column;height:100vh}
-    header{padding:1rem;background:#071032;display:flex;align-items:center;gap:1rem}
-    main{flex:1;display:grid;grid-template-columns:320px 1fr;gap:1rem;padding:1rem}
-    .card{background:#0b1220;border-radius:12px;padding:12px;box-shadow:0 6px 18px rgba(2,6,23,.6)}
-    input,button,textarea{font:inherit;padding:.5rem;border-radius:8px;border:1px solid rgba(255,255,255,.06);background:transparent;color:inherit}
-    button{cursor:pointer}
-    #messages{height:calc(100vh - 160px);overflow:auto;padding:12px;display:flex;flex-direction:column;gap:.5rem}
-    .msg{max-width:70%;padding:.5rem .75rem;border-radius:10px;background:#08112a;word-wrap:break-word}
-    .me{align-self:flex-end;background:#12304a}
-    pre{height:160px;overflow:auto;font-size:.8rem}
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reliable P2P Chat</title>
+<style>
+body{font-family:system-ui;margin:0;background:#0f172a;color:#e6eef8;display:flex;flex-direction:column;height:100vh}
+header{padding:1rem;background:#071032;display:flex;align-items:center;gap:1rem}
+main{flex:1;display:grid;grid-template-columns:320px 1fr;gap:1rem;padding:1rem}
+.card{background:#0b1220;border-radius:12px;padding:12px;box-shadow:0 6px 18px rgba(2,6,23,.6)}
+input,button,textarea{font:inherit;padding:.5rem;border-radius:8px;border:1px solid rgba(255,255,255,.06);background:transparent;color:inherit}
+button{cursor:pointer}
+#messages{height:calc(100vh - 160px);overflow:auto;padding:12px;display:flex;flex-direction:column;gap:.5rem}
+.msg{max-width:70%;padding:.5rem .75rem;border-radius:10px;background:#08112a;word-wrap:break-word}
+.me{align-self:flex-end;background:#12304a}
+pre{height:160px;overflow:auto;font-size:.8rem}
+</style>
 </head>
 <body>
-  <header><strong>Minimal Working P2P Chat</strong></header>
-  <main>
-    <section class="card">
-      <button id="createBtn">Create Room</button>
-      <button id="joinBtn">Join Room from URL</button>
-      <label>Invite URL:</label>
-      <textarea id="inviteBox" rows="2" readonly></textarea>
-      <label>Status:</label>
-      <div id="status">idle</div>
-      <label>Logs:</label>
-      <pre id="log"></pre>
-    </section>
-    <section class="card">
-      <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem">
-        <input id="messageInput" placeholder="Type a message..." style="flex:1">
-        <button id="sendBtn">Send</button>
-      </div>
-      <div id="messages"></div>
-    </section>
-  </main>
+<header><strong>Reliable P2P Chat</strong></header>
+<main>
+<section class="card">
+<button id="createBtn">Create Room</button>
+<button id="joinBtn">Join Room from URL</button>
+<label>Invite URL:</label>
+<textarea id="inviteBox" rows="2" readonly></textarea>
+<label>Status:</label>
+<div id="status">idle</div>
+<label>Logs:</label>
+<pre id="log"></pre>
+</section>
+<section class="card">
+<div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem">
+<input id="messageInput" placeholder="Type a message..." style="flex:1">
+<button id="sendBtn">Send</button>
+</div>
+<div id="messages"></div>
+</section>
+</main>
 
-  <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js";
-    import { getDatabase, ref, push, onChildAdded, remove } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js";
+import { getDatabase, ref, push, onChildAdded, remove } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
 
-    // Firebase config
-    const firebaseConfig = {
-      apiKey: "AIzaSyCAuSK6SoHVqOjIS7LxnLiXRJDLYS5rA9Q",
-      authDomain: "messanger-e973f.firebaseapp.com",
-      databaseURL: "https://messanger-e973f-default-rtdb.firebaseio.com",
-      projectId: "messanger-e973f",
-      storageBucket: "messanger-e973f.firebasestorage.app",
-      messagingSenderId: "797920714063",
-      appId: "1:797920714063:web:b86d6f38191f40d8fa393a",
-      measurementId: "G-TSM8BKWNV2"
-    };
-    const app = initializeApp(firebaseConfig);
-    const db = getDatabase(app);
+// Firebase config
+const firebaseConfig = {
+  apiKey: "AIzaSyCAuSK6SoHVqOjIS7LxnLiXRJDLYS5rA9Q",
+  authDomain: "messanger-e973f.firebaseapp.com",
+  databaseURL: "https://messanger-e973f-default-rtdb.firebaseio.com",
+  projectId: "messanger-e973f",
+  storageBucket: "messanger-e973f.firebasestorage.app",
+  messagingSenderId: "797920714063",
+  appId: "1:797920714063:web:b86d6f38191f40d8fa393a",
+  measurementId: "G-TSM8BKWNV2"
+};
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
 
-    // Helpers
-    const $ = id => document.getElementById(id);
-    const log = (...a)=>{ const el=$("log"); el.textContent+=a.join(" ")+"\n"; el.scrollTop=el.scrollHeight; };
-    function showMessage(t,me=true){ const d=document.createElement("div"); d.className="msg"+(me?" me":""); d.textContent=t; $("messages").appendChild(d); $("messages").scrollTop=$("messages").scrollHeight; }
+// Helpers
+const $ = id => document.getElementById(id);
+const log = (...a)=>{ const el=$("log"); el.textContent+=a.join(" ")+"\n"; el.scrollTop=el.scrollHeight; };
+function showMessage(t,me=true){ const d=document.createElement("div"); d.className="msg"+(me?" me":""); d.textContent=t; $("messages").appendChild(d); $("messages").scrollTop=$("messages").scrollHeight; }
 
-    // Firebase signaling
-    async function writeSignal(room, tag, payload){ await push(ref(db, `rooms/${room}/signals`), {tag,payload}); }
-    function listenSignals(room,onMsg){ onChildAdded(ref(db, `rooms/${room}/signals`), snap=>onMsg(snap.key,snap.val())); }
-    async function clearSignals(room){ await remove(ref(db, `rooms/${room}`)); }
+// Firebase signaling
+async function writeSignal(room, payload){ await push(ref(db, `rooms/${room}/signals`), payload); }
+function listenSignals(room,onMsg){ onChildAdded(ref(db, `rooms/${room}/signals`), snap=>onMsg(snap.key,snap.val())); }
+async function clearRoom(room){ await remove(ref(db, `rooms/${room}`)); }
 
-    // WebRTC
-    let pc, dc, roomId;
-    let iceQueue = [];
+// WebRTC
+let pc, dc, roomId;
+let iceQueue=[];
 
-    // Create peer
-    async function createPeer(isCaller){
-      pc = new RTCPeerConnection({
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          {
-            urls: 'turn:openrelay.metered.ca:443',
-            username: 'openrelayprojectsecret',
-            credential: 'openrelayprojectsecret'
-          }
-        ]
-      });
-      pc.onconnectionstatechange = ()=>{$("status").textContent=pc.connectionState; log("State: "+pc.connectionState);}
-      pc.onicecandidate = e=>{ if(e.candidate) writeSignal(roomId,'ice',JSON.stringify(e.candidate)); };
+// Create peer connection with TURN fallback
+function createPeerConnection(){
+  pc = new RTCPeerConnection({
+    iceServers:[
+      {urls:'stun:stun.l.google.com:19302'},
+      {urls:'turn:openrelay.metered.ca:443',username:'openrelayprojectsecret',credential:'openrelayprojectsecret'}
+    ]
+  });
+  pc.onconnectionstatechange = ()=>{$("status").textContent=pc.connectionState; log("State: "+pc.connectionState);}
+  pc.onicecandidate = e=>{ if(e.candidate) writeSignal(roomId,{type:'ice',candidate:e.candidate}); };
+}
 
-      if(isCaller){
-        dc = pc.createDataChannel("chat");
-        setupDC();
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await writeSignal(roomId,'sdp',JSON.stringify(offer));
-        log("Offer sent");
-      } else {
-        pc.ondatachannel = e=>{ dc=e.channel; setupDC(); };
-      }
-    }
+// DataChannel setup
+function setupDataChannel(){
+  dc.onopen = ()=>{$("status").textContent="connected"; clearRoom(roomId); log("DataChannel open ✅");};
+  dc.onmessage = e=>{ showMessage(e.data,false); };
+}
 
-    // Setup DataChannel
-    function setupDC(){
-      dc.onopen = ()=>{$("status").textContent="connected"; clearSignals(roomId); log("DataChannel open ✅");};
-      dc.onmessage = e=>{ showMessage(e.data,false); };
-    }
+// Handle incoming signals
+async function handleSignal(_, obj){
+  const data = obj;
+  if(data.type==='offer'){
+    await pc.setRemoteDescription(data);
+    log("Remote SDP set");
+    dc = pc.createDataChannel("chat");
+    setupDataChannel();
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await writeSignal(roomId,answer);
+    log("Answer sent");
+    for(const c of iceQueue) await pc.addIceCandidate(c);
+    iceQueue=[];
+  }
+  else if(data.type==='answer'){
+    await pc.setRemoteDescription(data);
+    log("Remote SDP set");
+    for(const c of iceQueue) await pc.addIceCandidate(c);
+    iceQueue=[];
+  }
+  else if(data.type==='ice'){
+    const cand = data.candidate;
+    if(pc.remoteDescription) await pc.addIceCandidate(cand);
+    else iceQueue.push(cand);
+    log("ICE received");
+  }
+}
 
-    // Handle signals
-    async function handleSignal(_, obj){
-      const data = JSON.parse(obj.payload);
+// UI actions
+$("createBtn").onclick = async ()=>{
+  roomId = Math.random().toString(36).slice(2,10);
+  const url = `${location.origin}${location.pathname}?room=${roomId}`;
+  $("inviteBox").value = url;
+  history.replaceState(null,'',`?room=${roomId}`);
+  createPeerConnection();
+  dc = pc.createDataChannel("chat");
+  setupDataChannel();
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await writeSignal(roomId,offer);
+  listenSignals(roomId,handleSignal);
+  log("Room created: "+roomId);
+};
 
-      if(data.type === "offer" || data.type === "answer"){
-        // proper SDP object
-        await pc.setRemoteDescription(data);
-        log("Remote SDP set");
+$("joinBtn").onclick = async ()=>{
+  const params = new URLSearchParams(location.search);
+  roomId = params.get("room");
+  if(!roomId) return alert("No room in URL");
+  createPeerConnection();
+  pc.ondatachannel = e=>{ dc=e.channel; setupDataChannel(); };
+  listenSignals(roomId,handleSignal);
+  log("Joined room: "+roomId);
+};
 
-        if(data.type === "offer"){
-          const ans = await pc.createAnswer();
-          await pc.setLocalDescription(ans);
-          await writeSignal(roomId,'sdp',JSON.stringify(ans));
-          log("Answer sent");
-        }
-
-        // flush ICE queue
-        for(const c of iceQueue){ await pc.addIceCandidate(c); }
-        iceQueue = [];
-      }
-      else if(data.candidate){
-        if(pc.remoteDescription) await pc.addIceCandidate(data);
-        else iceQueue.push(data);
-        log("ICE received");
-      }
-    }
-
-    // UI
-    $("createBtn").onclick = async ()=>{
-      const rid = Math.random().toString(36).slice(2,10);
-      roomId = rid;
-      const url = `${location.origin}${location.pathname}?room=${rid}`;
-      $("inviteBox").value = url;
-      history.replaceState(null,'',`?room=${rid}`);
-      await createPeer(true);
-      listenSignals(rid,handleSignal);
-      log("Room created: "+rid);
-    };
-
-    $("joinBtn").onclick = async ()=>{
-      const params = new URLSearchParams(location.search);
-      const rid = params.get("room");
-      if(!rid) return alert("No ?room in URL");
-      roomId = rid;
-      await createPeer(false);
-      listenSignals(rid,handleSignal);
-      log("Joined room: "+rid);
-    };
-
-    $("sendBtn").onclick = ()=>{
-      const msg = $("messageInput").value.trim();
-      if(!msg||!dc||dc.readyState!=="open") return alert("Not connected yet");
-      dc.send(msg);
-      showMessage(msg,true);
-      $("messageInput").value="";
-    };
-  </script>
+$("sendBtn").onclick = ()=>{
+  const msg = $("messageInput").value.trim();
+  if(!msg||!dc||dc.readyState!=="open") return alert("Not connected yet");
+  dc.send(msg);
+  showMessage(msg,true);
+  $("messageInput").value="";
+};
+</script>
 </body>
 </html>
