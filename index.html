@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Private P2P Chat Working</title>
+<title>Minimal P2P Chat</title>
 <style>
 body{font-family:system-ui;margin:0;background:#0f172a;color:#e6eef8;display:flex;flex-direction:column;height:100vh}
 header{padding:1rem;background:#071032;display:flex;align-items:center;gap:1rem}
@@ -18,16 +18,16 @@ pre{height:160px;overflow:auto;font-size:.8rem}
 </style>
 </head>
 <body>
-<header><strong>Private P2P Chat Working</strong></header>
+<header><strong>Minimal P2P Chat</strong></header>
 <main>
 <section class="card">
 <button id="createBtn">Create Room</button>
 <button id="joinBtn">Join Room from URL</button>
-<label>Invite URL (share full link):</label>
+<label>Invite URL:</label>
 <textarea id="inviteBox" rows="2" readonly></textarea>
-<label>Connection Status:</label>
+<label>Status:</label>
 <div id="status">idle</div>
-<label>Debug Logs:</label>
+<label>Logs:</label>
 <pre id="log"></pre>
 </section>
 <section class="card">
@@ -43,7 +43,7 @@ pre{height:160px;overflow:auto;font-size:.8rem}
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js";
 import { getDatabase, ref, push, onChildAdded, remove } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
 
-// ==== Firebase config ====
+// Firebase config
 const firebaseConfig = {
   apiKey: "AIzaSyCAuSK6SoHVqOjIS7LxnLiXRJDLYS5rA9Q",
   authDomain: "messanger-e973f.firebaseapp.com",
@@ -57,105 +57,69 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 
-// === Helpers ===
+// Helpers
 const $ = id => document.getElementById(id);
-const log = (...a) => { const el=$("log"); el.textContent+=a.join(" ")+"\n"; el.scrollTop=el.scrollHeight; };
+const log = (...a)=>{ const el=$("log"); el.textContent+=a.join(" ")+"\n"; el.scrollTop=el.scrollHeight; };
 function showMessage(t,me=true){ const d=document.createElement("div"); d.className="msg"+(me?" me":""); d.textContent=t; $("messages").appendChild(d); $("messages").scrollTop=$("messages").scrollHeight; }
 
-// === Firebase signaling ===
-async function writeSignal(room, tag, payload){ await push(ref(db, `rooms/${room}/signals`), {tag,payload,ts:Date.now()}); }
+// Firebase signaling
+async function writeSignal(room, tag, payload){ await push(ref(db, `rooms/${room}/signals`), {tag,payload}); }
 function listenSignals(room,onMsg){ onChildAdded(ref(db, `rooms/${room}/signals`), snap=>onMsg(snap.key,snap.val())); }
 async function clearSignals(room){ await remove(ref(db, `rooms/${room}`)); }
 
-// === WebRTC ===
+// WebRTC
 let pc, dc, roomId;
-let pendingICE = []; // queue ICE before remoteDescription
+let iceQueue=[];
 
 async function createPeer(isCaller){
-  const rtcConfig = {
-    iceServers:[
-      {urls:['stun:stun.l.google.com:19302']},
-      {urls:'turn:relay1.expressturn.com:3478',username:'efree',credential:'efreepass'}
-    ]
-  };
-
-  pc = new RTCPeerConnection(rtcConfig);
-
-  // ICE handling
-  pc.onicecandidate = async e => {
-    if(!e.candidate) return;
-    const msg = JSON.stringify({type:'ice',candidate:e.candidate});
-    await writeSignal(roomId,'ice',msg);
-    log("Sent ICE");
-  };
-
-  pc.onconnectionstatechange = ()=>{ $("status").textContent=pc.connectionState; log("Peer state: "+pc.connectionState); };
-
+  pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+  pc.onconnectionstatechange = ()=>{$("status").textContent=pc.connectionState; log("State: "+pc.connectionState);}
+  
+  pc.onicecandidate = e=>{ if(e.candidate) writeSignal(roomId,'ice',JSON.stringify(e.candidate)); };
+  
   if(isCaller){
     dc = pc.createDataChannel("chat");
     setupDC();
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    await writeSignal(roomId,'sdp',JSON.stringify({type:'sdp',sdp:offer}));
+    writeSignal(roomId,'sdp',JSON.stringify(offer));
     log("Offer sent");
   } else {
     pc.ondatachannel = e=>{ dc=e.channel; setupDC(); };
   }
 }
 
-// Setup DataChannel
 function setupDC(){
-  dc.onopen = ()=>{ $("status").textContent="connected"; log("DataChannel open ✅"); clearSignals(roomId); };
+  dc.onopen = ()=>{$("status").textContent="connected"; clearSignals(roomId); log("DataChannel open ✅");};
   dc.onmessage = e=>{ showMessage(e.data,false); };
 }
 
-// ICE queue handling
-async function handleICE(data){
-  if(!pc.remoteDescription){
-    pendingICE.push(data.candidate);
-    log("Queued ICE candidate");
-  } else {
-    try{ await pc.addIceCandidate(data.candidate); log("Added ICE"); }
-    catch(e){ log("ICE add error",e); }
-  }
-}
-async function flushICEQueue(){
-  for(const c of pendingICE){
-    try{ await pc.addIceCandidate(c); log("Flushed ICE"); } 
-    catch(e){ log("ICE flush error", e); }
-  }
-  pendingICE=[];
-}
-
-// Handle incoming signals
 async function handleSignal(_, obj){
   const data = JSON.parse(obj.payload);
-  if(data.type==="sdp"){
-    const sdp = data.sdp;
-    if(sdp.type==="offer"){
-      log("Received offer");
+  if(data.type==="answer" || data.sdp){
+    // Set remoteDescription once
+    const sdp = data.sdp||data;
+    if(!pc.currentRemoteDescription){
       await pc.setRemoteDescription(sdp);
-      await flushICEQueue();
-      const ans = await pc.createAnswer();
-      await pc.setLocalDescription(ans);
-      await writeSignal(roomId,'sdp',JSON.stringify({type:'sdp',sdp:ans}));
-      log("Answer sent");
-    } else if(sdp.type==="answer"){
-      log("Received answer");
-      await pc.setRemoteDescription(sdp);
-      await flushICEQueue();
+      log("Remote SDP set");
+      // Flush queued ICE
+      for(const c of iceQueue){ await pc.addIceCandidate(c); }
+      iceQueue=[];
     }
-  } else if(data.type==="ice"){
-    await handleICE(data);
+  } else if(data.type==="ice" || data.candidate){
+    const cand = data.candidate||data;
+    if(pc.remoteDescription) await pc.addIceCandidate(cand);
+    else iceQueue.push(cand);
+    log("ICE received");
   }
 }
 
-// === UI ===
+// UI
 $("createBtn").onclick = async ()=>{
-  const rid=Math.random().toString(36).slice(2,10);
-  roomId=rid;
-  const url=`${location.origin}${location.pathname}?room=${rid}`;
-  $("inviteBox").value=url;
+  const rid = Math.random().toString(36).slice(2,10);
+  roomId = rid;
+  const url = `${location.origin}${location.pathname}?room=${rid}`;
+  $("inviteBox").value = url;
   history.replaceState(null,'',`?room=${rid}`);
   await createPeer(true);
   listenSignals(rid,handleSignal);
@@ -163,18 +127,18 @@ $("createBtn").onclick = async ()=>{
 };
 
 $("joinBtn").onclick = async ()=>{
-  const params=new URLSearchParams(location.search);
-  const rid=params.get("room");
-  if(!rid) return alert("No ?room in URL!");
-  roomId=rid;
+  const params = new URLSearchParams(location.search);
+  const rid = params.get("room");
+  if(!rid) return alert("No ?room in URL");
+  roomId = rid;
   await createPeer(false);
   listenSignals(rid,handleSignal);
   log("Joined room: "+rid);
 };
 
 $("sendBtn").onclick = ()=>{
-  const msg=$("messageInput").value.trim();
-  if(!msg||!dc||dc.readyState!=="open") return alert("Not connected yet!");
+  const msg = $("messageInput").value.trim();
+  if(!msg||!dc||dc.readyState!=="open") return alert("Not connected yet");
   dc.send(msg);
   showMessage(msg,true);
   $("messageInput").value="";
