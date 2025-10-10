@@ -13,7 +13,7 @@
     input,button,textarea{font:inherit;padding:.5rem;border-radius:8px;border:1px solid rgba(255,255,255,.06);background:transparent;color:inherit}
     button{cursor:pointer}
     #messages{height:calc(100vh - 160px);overflow:auto;padding:12px;display:flex;flex-direction:column;gap:.5rem}
-    .msg{max-width:70%;padding:.5rem .75rem;border-radius:10px;background:#08112a}
+    .msg{max-width:70%;padding:.5rem .75rem;border-radius:10px;background:#08112a;word-wrap:break-word}
     .me{align-self:flex-end;background:#12304a}
     footer{padding:.5rem;background:#071032;text-align:center;font-size:.9rem}
     .hint{font-size:.85rem;color:#9fb3d6}
@@ -27,20 +27,15 @@
   <main>
     <section class="card controls">
       <div>
-        <button id="createBtn">Create room (generate invite)</button>
+        <button id="createBtn">Create room</button>
         <button id="joinBtn">Join room from URL</button>
       </div>
-
-      <label class="hint">Your invite (share FULL URL including the #fragment secret):</label>
+      <label class="hint">Invite link (share full URL with #key):</label>
       <textarea id="inviteBox" rows="2" readonly></textarea>
-
       <label class="hint">Connection status:</label>
       <div id="status">idle</div>
-
-      <label class="hint">Local logs (for debugging):</label>
-      <pre id="log" style="height:160px;overflow:auto"></pre>
-
-      <div class="hint">Keep the fragment (after #) private. If you refresh the page, re-open the same invite URL to rejoin temporarily.</div>
+      <label class="hint">Debug logs:</label>
+      <pre id="log" style="height:180px;overflow:auto;font-size:.8rem"></pre>
     </section>
 
     <section class="card">
@@ -51,13 +46,13 @@
       <div id="messages"></div>
     </section>
   </main>
-  <footer>GitHub Pages + Firebase signaling | Messages stored only in browser memory</footer>
+  <footer>GitHub Pages + Firebase + TURN | Temporary encrypted chat</footer>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js";
-import { getDatabase, ref, push, onChildAdded, remove, get } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
+import { getDatabase, ref, push, onChildAdded, remove } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
 
-// 🔥 Your Firebase configuration
+// ==== Firebase config ====
 const firebaseConfig = {
   apiKey: "AIzaSyCAuSK6SoHVqOjIS7LxnLiXRJDLYS5rA9Q",
   authDomain: "messanger-e973f.firebaseapp.com",
@@ -72,11 +67,11 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 
-// ===== Utilities =====
+// === Shortcuts ===
 const $ = id => document.getElementById(id);
 const log = (...a) => { const el=$("log"); el.textContent+=a.join(" ")+"\\n"; el.scrollTop=el.scrollHeight; };
 
-// Crypto helpers
+// === Crypto helpers (AES-GCM) ===
 const enc = new TextEncoder(), dec = new TextDecoder();
 const toB64 = b => btoa(String.fromCharCode(...new Uint8Array(b)));
 const fromB64 = s => Uint8Array.from(atob(s), c=>c.charCodeAt(0));
@@ -100,7 +95,7 @@ async function aesDecrypt(key, combo){
   return dec.decode(plain);
 }
 
-// ===== Firebase signaling =====
+// === Firebase helpers ===
 async function writeSignal(room, tag, payload){
   await push(ref(db, `rooms/${room}/signals`), { tag, payload, ts:Date.now() });
 }
@@ -112,19 +107,35 @@ async function clearSignals(room){
   await remove(ref(db, `rooms/${room}`));
 }
 
-// ===== WebRTC =====
+// === WebRTC ===
 let pc, dc, derivedKey, roomId;
 
 async function createPeer(isCaller){
-  pc = new RTCPeerConnection({iceServers:[{urls:['stun:stun.l.google.com:19302']}]});
+  const rtcConfig = {
+    iceServers: [
+      { urls: ['stun:stun.l.google.com:19302'] },
+      {
+        urls: 'turn:relay1.expressturn.com:3478',
+        username: 'efree',
+        credential: 'efreepass'
+      }
+    ]
+  };
+
+  pc = new RTCPeerConnection(rtcConfig);
   pc.onicecandidate = async e=>{
     if(e.candidate){
       const msg = JSON.stringify({type:'ice',candidate:e.candidate});
-      const enc = await aesEncrypt(derivedKey, msg);
-      await writeSignal(roomId, 'ice', enc);
+      const encMsg = await aesEncrypt(derivedKey, msg);
+      await writeSignal(roomId, 'ice', encMsg);
+      log("Sent ICE candidate");
     }
   };
-  pc.onconnectionstatechange = ()=>{ $("status").textContent = pc.connectionState; };
+
+  pc.onconnectionstatechange = ()=>{
+    $("status").textContent = pc.connectionState;
+    log("Peer state:", pc.connectionState);
+  };
 
   if(isCaller){
     dc = pc.createDataChannel("chat");
@@ -133,39 +144,53 @@ async function createPeer(isCaller){
     await pc.setLocalDescription(offer);
     const encSDP = await aesEncrypt(derivedKey, JSON.stringify({type:'sdp',sdp:pc.localDescription}));
     await writeSignal(roomId, 'sdp', encSDP);
+    log("Offer created and sent");
   } else {
     pc.ondatachannel = e => { dc = e.channel; setupDC(); };
   }
 }
 
 function setupDC(){
-  dc.onopen = ()=>{ $("status").textContent="connected"; log("DataChannel open"); clearSignals(roomId); };
+  dc.onopen = ()=>{ $("status").textContent="connected"; log("DataChannel open ✅"); clearSignals(roomId); };
   dc.onmessage = async e=>{
-    const msg = await aesDecrypt(derivedKey, e.data);
-    showMessage(msg, false);
+    try {
+      const msg = await aesDecrypt(derivedKey, e.data);
+      showMessage(msg,false);
+    } catch {
+      log("Decryption failed (wrong key?)");
+    }
   };
 }
 
 async function handleSignal(_, obj){
   const text = await aesDecrypt(derivedKey, obj.payload);
   const data = JSON.parse(text);
+
   if(data.type==="sdp"){
     const sdp = data.sdp;
     if(sdp.type==="offer"){
+      log("Received offer");
       await pc.setRemoteDescription(sdp);
       const ans = await pc.createAnswer();
       await pc.setLocalDescription(ans);
       const encAns = await aesEncrypt(derivedKey, JSON.stringify({type:'sdp',sdp:pc.localDescription}));
       await writeSignal(roomId, 'sdp', encAns);
+      log("Answer created and sent");
     } else if(sdp.type==="answer"){
+      log("Received answer");
       await pc.setRemoteDescription(sdp);
     }
   } else if(data.type==="ice"){
-    await pc.addIceCandidate(data.candidate);
+    try {
+      await pc.addIceCandidate(data.candidate);
+      log("Added ICE candidate");
+    } catch(e){
+      log("ICE add error", e);
+    }
   }
 }
 
-// ===== UI =====
+// === UI ===
 function showMessage(t,me=true){
   const d=document.createElement("div");
   d.className="msg"+(me?" me":"");
@@ -191,7 +216,7 @@ $("createBtn").onclick = async ()=>{
 $("joinBtn").onclick = async ()=>{
   const params=new URLSearchParams(location.search);
   const rid=params.get("room");
-  if(!rid) return alert("No ?room in URL!");
+  if(!rid) return alert("No ?room= in URL!");
   const frag=location.hash.slice(1);
   const key=decodeURIComponent(frag.split("=")[1]||"");
   if(!key) return alert("Missing #key= fragment!");
@@ -204,7 +229,7 @@ $("joinBtn").onclick = async ()=>{
 
 $("sendBtn").onclick = async ()=>{
   const msg=$("messageInput").value.trim();
-  if(!msg||!dc||dc.readyState!=="open")return;
+  if(!msg||!dc||dc.readyState!=="open")return alert("Not connected yet!");
   const encMsg=await aesEncrypt(derivedKey,msg);
   dc.send(encMsg);
   showMessage(msg,true);
