@@ -8,11 +8,12 @@ const firebaseConfig = {
   authDomain: "messanger-e973f.firebaseapp.com",
   databaseURL: "https://messanger-e973f-default-rtdb.firebaseio.com",
   projectId: "messanger-e973f",
-  storageBucket: "messanger-e973f.firebasestorage.app",
+  storageBucket: "messanger-e973f.appspot.com",   // ✅ FIXED HERE
   messagingSenderId: "797920714063",
   appId: "1:797920714063:web:b86d6f38191f40d8fa393a",
   measurementId: "G-TSM8BKWNV2"
 };
+
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
